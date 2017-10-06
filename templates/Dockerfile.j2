@@ -31,7 +31,7 @@ RUN groupadd -g 1000 elasticsearch && adduser -u 1000 -g 1000 -d /usr/share/elas
 
 WORKDIR /usr/share/elasticsearch
 
-USER elasticsearch
+USER 1000
 
 # Download and extract defined ES version.
 RUN curl -fsSL {{ url_root }}/{{ tarball }} | \
@@ -62,12 +62,11 @@ RUN for PLUGIN in {{ ingest_plugins }}; do \
 RUN for PLUGIN in x-pack {{ ingest_plugins }}; do \
   {% else -%}
 RUN for PLUGIN in {{ ingest_plugins }}; do \
-  {%- endif %}
-      elasticsearch-plugin install --batch "$PLUGIN"; \
-    done
+  {%- endif -%}
+      elasticsearch-plugin install --batch "$PLUGIN"; done
 {%- endif %}
 
-USER root
+USER 0
 
 {# A fair bit of duplication here, but making line breaks and '\' consistent
    coupled with jinja2 conditionals is complicated.
@@ -75,29 +74,35 @@ USER root
 
 {% if image_flavor == 'oss' -%}
 COPY elasticsearch.yml log4j2.properties config/
-COPY bin/es-docker bin/es-docker
+COPY bin/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 RUN chown elasticsearch:elasticsearch \
       config/elasticsearch.yml \
-      config/log4j2.properties \
-      bin/es-docker && \
-    chmod 0750 bin/es-docker
+      config/log4j2.properties && \
+    chgrp -R 0 . /usr/local/bin/docker-entrypoint.sh && \
+    chmod -R g=u . && \
+    chmod g=u /etc/passwd && \
+    chmod 0775 /usr/local/bin/docker-entrypoint.sh
 {% elif image_flavor == 'basic' -%}
 COPY elasticsearch.yml log4j2.properties config/
 RUN echo 'xpack.license.self_generated.type: basic' >>config/elasticsearch.yml
 COPY x-pack/log4j2.properties config/x-pack/
-COPY bin/es-docker bin/es-docker
+COPY bin/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
+# Openshift overrides USER and uses ones with randomly uid>1024 and gid=0
+# Allow ES to run even with a different user
 RUN chown elasticsearch:elasticsearch \
       config/elasticsearch.yml \
       config/log4j2.properties \
-      config/x-pack/log4j2.properties \
-      bin/es-docker && \
-    chmod 0750 bin/es-docker
+      config/x-pack/log4j2.properties && \
+    chgrp -R 0 . /usr/local/bin/docker-entrypoint.sh && \
+    chmod -R g=u . && \
+    chmod g=u /etc/passwd && \
+    chmod 0775 /usr/local/bin/docker-entrypoint.sh
 {% elif image_flavor == 'platinum' -%}
 COPY elasticsearch.yml certgen_instances.yml log4j2.properties config/
 COPY x-pack/log4j2.properties config/x-pack/
-COPY bin/es-docker bin/es-docker
+COPY bin/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 RUN echo 'xpack.license.self_generated.type: trial' >>config/elasticsearch.yml
 
@@ -105,17 +110,18 @@ RUN chown elasticsearch:elasticsearch \
       config/certgen_instances.yml \
       config/elasticsearch.yml \
       config/log4j2.properties \
-      config/x-pack/log4j2.properties \
-      bin/es-docker && \
-    chmod 0750 bin/es-docker
+      config/x-pack/log4j2.properties && \
+    chgrp -R 0 . /usr/local/bin/docker-entrypoint.sh && \
+    chmod -R g=u . && \
+    chmod g=u /etc/passwd && \
+    chmod 0775 /usr/local/bin/docker-entrypoint.sh
+
+RUN bin/x-pack/certgen -s -in config/certgen_instances.yml --out config/certs.zip && \
+    unzip -d config/x-pack/ config/certs.zip && \
+    rm config/certs.zip config/certgen_instances.yml
 {% endif -%}
-
-USER elasticsearch
-
-{% if image_flavor == 'platinum' -%}
-RUN bin/x-pack/certgen -s -in config/certgen_instances.yml --out config/certs.zip && unzip -d config/x-pack/ config/certs.zip && rm config/certs.zip config/certgen_instances.yml
-{% endif -%}
-
-CMD ["/bin/bash", "bin/es-docker"]
 
 EXPOSE 9200 9300
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["eswrapper"]

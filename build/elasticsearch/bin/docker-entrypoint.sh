@@ -1,6 +1,37 @@
 #!/bin/bash
+set -e
 
-# Run Elasticsearch and allow setting default settings via env vars
+# Create random user entry, if different from uid 1000, to support Openshift
+# https://docs.openshift.org/latest/creating_images/guidelines.html
+if ! whoami &> /dev/null; then
+    if [ -w /etc/passwd ]; then
+        echo "${USER_NAME:-default}:x:$(id -u):0:${USER_NAME:-default} user:/usr/share/elasticsearch:/sbin/nologin" >> /etc/passwd
+    fi
+fi
+
+run_as_other_user_if_needed() {
+    if [[ "$(id -u)" == "0" ]]; then
+        # If running as root, drop to specified UID and run command
+        exec chroot --userspec=1000 / "${@}"
+    else
+        # Either we are running in Openshift with random uid and are a member of the root group
+        # or with a custom --user
+        exec "${@}"
+    fi
+}
+
+# Allow user specify custom CMD, maybe bin/elasticsearch itself
+# for example to directly specify `-E` style parameters for elasticsearch on k8s
+# or simply to run /bin/bash to check the image
+if [[ "$1" != "eswrapper" ]]; then
+    if [[ "$(id -u)" == "0" ]] && [[ "$1" == *elasticsearch* ]]; then
+        exec chroot --userspec=1000 / "$@"
+    else
+        exec "$@"
+    fi
+fi
+
+# Parse Docker env vars to customize Elasticsearch
 #
 # e.g. Setting the env var cluster.name=testcluster
 #
@@ -42,8 +73,8 @@ if bin/elasticsearch-plugin list -s | grep -q x-pack; then
     # node at this step, we can't enforce the presence of this env
     # var.
     if [[ -n "$ELASTIC_PASSWORD" ]]; then
-        [[ -f config/elasticsearch.keystore ]] || bin/elasticsearch-keystore create
-        echo "$ELASTIC_PASSWORD" | bin/elasticsearch-keystore add -x 'bootstrap.password'
+        [[ -f config/elasticsearch.keystore ]] || run_as_other_user_if_needed "bin/elasticsearch-keystore" "create"
+        run_as_other_user_if_needed echo "$ELASTIC_PASSWORD" | bin/elasticsearch-keystore add -x 'bootstrap.password'
     fi
 
     # ALLOW_INSECURE_DEFAULT_TLS_CERT=true permits the use of a
@@ -59,4 +90,11 @@ if bin/elasticsearch-plugin list -s | grep -q x-pack; then
     fi
 fi
 
-exec bin/elasticsearch "${es_opts[@]}"
+if [[ "$(id -u)" == "0" ]]; then
+    # If requested and running as root, mutate the ownership of bind-mounts
+    if [[ -n "$MUTATE_MOUNTS" ]]; then
+        chown -R 1000:0 /usr/share/elasticsearch/{data,logs}
+    fi
+fi
+
+run_as_other_user_if_needed /usr/share/elasticsearch/bin/elasticsearch "${es_opts[@]}"
